@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EzLive P2P 채팅 애플리케이션</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- PeerJS CDN -->
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <style>
+        /* Inter 폰트 사용 */
+        body { font-family: 'Inter', sans-serif; }
+        /* 스크롤바 스타일링 (선택 사항) */
+        #chat-window::-webkit-scrollbar {
+            width: 8px;
+        }
+        #chat-window::-webkit-scrollbar-thumb {
+            background-color: #a8a29e;
+            border-radius: 10px;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen p-4 md:p-8 flex items-center justify-center">
+
+    <div class="w-full max-w-xl bg-white shadow-xl rounded-xl overflow-hidden">
+        <header class="bg-indigo-600 text-white p-4 text-center">
+            <h1 class="text-3xl font-bold">EzLive</h1>
+            <p class="text-sm mt-1">WebRTC 기반 P2P 채팅</p>
+        </header>
+
+        <main class="p-6">
+            <!-- 상태 및 ID 설정 영역 -->
+            <section class="mb-6 space-y-3">
+                <div class="flex flex-col sm:flex-row sm:items-center justify-between p-3 bg-indigo-50 rounded-lg shadow-inner">
+                    <span class="font-medium text-indigo-700">내 Peer ID:</span>
+                    <span id="my-peer-id" class="text-sm font-mono bg-indigo-200 text-indigo-900 py-1 px-3 rounded-full truncate mt-1 sm:mt-0 cursor-pointer" title="클릭하여 복사">
+                        로드 중...
+                    </span>
+                </div>
+                
+                <div id="status-message" class="text-sm text-center font-semibold text-gray-600">
+                    상태: 연결 대기 중...
+                </div>
+                
+                <div class="flex flex-col sm:flex-row gap-3">
+                    <input type="text" id="remote-peer-id" placeholder="상대방 Peer ID를 입력하세요" class="flex-grow p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 transition duration-150" aria-label="상대방 Peer ID">
+                    <button id="connect-button" onclick="connectToPeer()" class="w-full sm:w-auto px-6 py-3 bg-green-500 text-white font-semibold rounded-lg hover:bg-green-600 transition duration-150 shadow-md disabled:opacity-50" disabled>
+                        연결하기
+                    </button>
+                </div>
+
+                <div id="info-box" class="hidden p-3 bg-yellow-100 border-l-4 border-yellow-500 text-yellow-800 rounded-lg text-sm">
+                    ⚠️ 먼저 자신의 ID를 상대방에게 공유하세요.
+                </div>
+            </section>
+
+            <!-- 채팅 영역 -->
+            <section id="chat-section" class="bg-gray-50 border border-gray-200 rounded-lg flex flex-col h-96 opacity-50 pointer-events-none transition duration-300">
+                <div id="chat-window" class="flex-grow p-4 space-y-4 overflow-y-auto">
+                    <!-- 메시지가 여기에 표시됩니다 -->
+                    <div class="text-center text-gray-500 pt-16">
+                        <p class="text-lg font-medium">채팅 시작 준비</p>
+                        <p class="text-sm mt-1">상대방과 연결되면 채팅이 가능합니다.</p>
+                    </div>
+                </div>
+
+                <!-- 메시지 입력 폼 -->
+                <div class="p-4 border-t border-gray-200 flex gap-2">
+                    <input type="text" id="message-input" placeholder="메시지를 입력하세요..." class="flex-grow p-3 border border-gray-300 rounded-full focus:ring-indigo-500 focus:border-indigo-500" disabled aria-label="메시지 입력">
+                    <button id="send-button" onclick="sendMessage()" class="px-6 py-3 bg-indigo-500 text-white font-semibold rounded-full hover:bg-indigo-600 transition duration-150 shadow-lg disabled:opacity-50" disabled>
+                        전송
+                    </button>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- 커스텀 모달 (Alert 대체) -->
+    <div id="custom-modal" class="fixed inset-0 bg-gray-900 bg-opacity-75 hidden items-center justify-center p-4 z-50">
+        <div class="bg-white rounded-xl shadow-2xl p-6 w-full max-w-sm transform transition-all scale-100">
+            <h3 class="text-xl font-bold mb-3 text-red-600" id="modal-title">오류</h3>
+            <p id="modal-body" class="text-gray-700 mb-6">오류 내용</p>
+            <button onclick="closeModal()" class="w-full py-2 bg-indigo-600 text-white font-semibold rounded-lg hover:bg-indigo-700 transition duration-150">
+                확인
+            </button>
+        </div>
+    </div>
+
+    <script type="module">
+        // --- Firebase/Firestore 초기화 및 인증 (필수 환경 변수 사용) ---
+        // P2P 채팅 자체는 PeerJS로 처리되지만, Canvas 환경 요구 사항에 따라 Firebase 초기화 코드를 포함합니다.
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, setDoc, doc, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        setLogLevel('debug');
+        
+        let app, db, auth;
+        let userId = null;
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        /**
+         * Firebase 초기화 및 사용자 인증을 처리합니다.
+         */
+        async function initializeFirebase() {
+            try {
+                if (firebaseConfig) {
+                    app = initializeApp(firebaseConfig);
+                    auth = getAuth(app);
+                    db = getFirestore(app);
+
+                    // 인증 처리
+                    if (initialAuthToken) {
+                        await signInWithCustomToken(auth, initialAuthToken);
+                        console.log("Firebase: Custom token sign-in successful.");
+                    } else {
+                        await signInAnonymously(auth);
+                        console.log("Firebase: Anonymous sign-in successful.");
+                    }
+
+                    onAuthStateChanged(auth, (user) => {
+                        if (user) {
+                            userId = user.uid;
+                            console.log("Firebase: User ID set:", userId);
+                            // 사용자 ID가 설정된 후 PeerJS 초기화
+                            initializePeerJS(userId); 
+                        } else {
+                            userId = null;
+                            console.log("Firebase: User logged out/anonymous.");
+                        }
+                    });
+                } else {
+                    console.warn("Firebase config not available. Proceeding without Firebase authentication.");
+                    // Firebase 없이 PeerJS 초기화 (임시 ID 사용)
+                    initializePeerJS(crypto.randomUUID());
+                }
+            } catch (error) {
+                console.error("Firebase Initialization or Auth Error:", error);
+                showModal("초기화 오류", `Firebase 초기화 중 문제가 발생했습니다: ${error.message}`);
+                // 오류 발생 시에도 PeerJS 초기화 시도
+                initializePeerJS(crypto.randomUUID()); 
+            }
+        }
+        
+        window.addEventListener('load', initializeFirebase);
+        
+        // --- PeerJS P2P 채팅 로직 ---
+        let peer = null;
+        let currentConnection = null;
+        let isConnected = false;
+        const statusMessage = document.getElementById('status-message');
+        const myPeerIdDisplay = document.getElementById('my-peer-id');
+        const remotePeerIdInput = document.getElementById('remote-peer-id');
+        const connectButton = document.getElementById('connect-button');
+        const messageInput = document.getElementById('message-input');
+        const sendButton = document.getElementById('send-button');
+        const chatWindow = document.getElementById('chat-window');
+        const chatSection = document.getElementById('chat-section');
+        const infoBox = document.getElementById('info-box');
+
+        /**
+         * PeerJS를 초기화하고 이벤트를 설정합니다.
+         * @param {string} baseId - 사용자 고유 ID (Firebase UID)
+         */
+        function initializePeerJS(baseId) {
+            // PeerJS ID는 'ezlive-' 프리픽스와 사용자 ID의 일부를 조합하여 쉽게 식별하도록 설정
+            const peerId = `ezlive-${baseId.substring(0, 8)}`; 
+            
+            try {
+                // Peer 객체 생성 (PeerJS 서버를 사용합니다)
+                peer = new Peer(peerId, { debug: 2 });
+                
+                myPeerIdDisplay.textContent = 'ID 생성 중...';
+                
+                // Peer ID가 성공적으로 생성되었을 때
+                peer.on('open', (id) => {
+                    myPeerIdDisplay.textContent = id;
+                    connectButton.disabled = false;
+                    statusMessage.textContent = '상태: ID 생성 완료. 연결 대기 중...';
+                    infoBox.classList.remove('hidden');
+                    console.log('My Peer ID:', id);
+                });
+
+                // 에러 발생 시
+                peer.on('error', (err) => {
+                    console.error('PeerJS Error:', err.type, err);
+                    statusMessage.textContent = `상태: 오류 발생 (${err.type})! 다시 시도하세요.`;
+                    showModal("연결 오류", `PeerJS 연결 중 심각한 오류가 발생했습니다: ${err.message}`);
+                });
+
+                // 상대방으로부터 연결 요청이 왔을 때 (수신자 역할)
+                peer.on('connection', (conn) => {
+                    if (currentConnection) {
+                        // 이미 연결되어 있다면 새 연결 요청 거부
+                        conn.close();
+                        console.warn('이미 연결 중입니다. 새 연결 요청을 거부합니다.');
+                        return;
+                    }
+                    
+                    currentConnection = conn;
+                    setupConnectionEvents(conn, false); // false는 수신자임을 의미
+                });
+
+                // 내 ID 복사 기능 추가
+                myPeerIdDisplay.onclick = () => {
+                    document.execCommand('copy', false, myPeerIdDisplay.textContent);
+                    statusMessage.textContent = '상태: 내 Peer ID가 복사되었습니다!';
+                    setTimeout(() => {
+                        if (!isConnected) {
+                            statusMessage.textContent = '상태: 연결 대기 중...';
+                        }
+                    }, 2000);
+                };
+
+            } catch (e) {
+                console.error("PeerJS 초기화 실패:", e);
+                statusMessage.textContent = '상태: PeerJS 초기화 실패.';
+                showModal("PeerJS 오류", `PeerJS 초기화 중 예외가 발생했습니다: ${e.message}`);
+            }
+        }
+
+        /**
+         * 상대방 Peer ID로 연결을 시도합니다. (발신자 역할)
+         */
+        window.connectToPeer = function() {
+            const remoteId = remotePeerIdInput.value.trim();
+            if (!remoteId) {
+                showModal("입력 필요", "상대방 Peer ID를 입력해 주세요.");
+                return;
+            }
+
+            if (remoteId === peer.id) {
+                showModal("오류", "자신에게는 연결할 수 없습니다.");
+                return;
+            }
+            
+            statusMessage.textContent = `상태: ${remoteId}로 연결 시도 중...`;
+            connectButton.disabled = true;
+
+            try {
+                // 상대방에게 DataConnection 요청
+                const conn = peer.connect(remoteId);
+                currentConnection = conn;
+                setupConnectionEvents(conn, true); // true는 발신자임을 의미
+            } catch (error) {
+                console.error("연결 시도 중 오류:", error);
+                statusMessage.textContent = '상태: 연결 시도 중 알 수 없는 오류 발생.';
+                connectButton.disabled = false;
+                currentConnection = null;
+            }
+        };
+
+        /**
+         * DataConnection 객체에 이벤트 리스너를 설정합니다.
+         * @param {PeerJS.DataConnection} conn - PeerJS DataConnection 객체
+         * @param {boolean} isInitiator - 연결을 시작한 쪽인지 여부
+         */
+        function setupConnectionEvents(conn, isInitiator) {
+            conn.on('open', () => {
+                isConnected = true;
+                const role = isInitiator ? '발신자' : '수신자';
+                statusMessage.textContent = `상태: ✅ ${conn.peer}과 연결되었습니다! (${role})`;
+                
+                // UI 활성화
+                chatSection.classList.remove('opacity-50', 'pointer-events-none');
+                messageInput.disabled = false;
+                sendButton.disabled = false;
+                connectButton.disabled = true;
+                remotePeerIdInput.disabled = true;
+                infoBox.classList.add('hidden');
+                
+                // 초기 안내 메시지 표시
+                displayMessage('시스템', `상대방 (${conn.peer})과 연결되었습니다.`, 'system');
+                console.log('Connection established with:', conn.peer);
+            });
+
+            conn.on('data', (data) => {
+                console.log('Received data:', data);
+                displayMessage('상대방', data, 'remote');
+            });
+
+            conn.on('close', () => {
+                isConnected = false;
+                statusMessage.textContent = '상태: ❌ 연결이 종료되었습니다. 다시 연결하세요.';
+                resetUI();
+                displayMessage('시스템', '상대방과의 연결이 종료되었습니다.', 'system');
+                console.log('Connection closed.');
+            });
+
+            conn.on('error', (err) => {
+                console.error('Connection Error:', err);
+                statusMessage.textContent = `상태: 연결 오류 (${err.type}).`;
+                displayMessage('시스템', `연결 오류 발생: ${err.message}`, 'system');
+                resetUI();
+            });
+        }
+
+        /**
+         * 메시지를 전송합니다.
+         */
+        window.sendMessage = function() {
+            const message = messageInput.value.trim();
+            if (!message || !isConnected || !currentConnection) return;
+
+            try {
+                currentConnection.send(message);
+                displayMessage('나', message, 'local');
+                messageInput.value = '';
+                messageInput.focus();
+            } catch (error) {
+                console.error("메시지 전송 실패:", error);
+                showModal("전송 실패", "메시지를 보내는 데 실패했습니다. 연결 상태를 확인하세요.");
+            }
+        };
+
+        // Enter 키로 메시지 전송
+        messageInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter' && !sendButton.disabled) {
+                sendMessage();
+            }
+        });
+
+        /**
+         * 채팅 창에 메시지를 표시합니다.
+         * @param {string} sender - 발신자 이름 ('나' 또는 '상대방')
+         * @param {string} text - 메시지 내용
+         * @param {string} type - 'local', 'remote', or 'system'
+         */
+        function displayMessage(sender, text, type) {
+            const messageDiv = document.createElement('div');
+            const now = new Date();
+            const time = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+            
+            let messageClass = '';
+            let contentClass = '';
+
+            if (type === 'local') {
+                messageClass = 'flex justify-end';
+                contentClass = 'bg-indigo-500 text-white rounded-t-xl rounded-bl-xl shadow-md max-w-xs md:max-w-md';
+            } else if (type === 'remote') {
+                messageClass = 'flex justify-start';
+                contentClass = 'bg-gray-300 text-gray-800 rounded-t-xl rounded-br-xl shadow-md max-w-xs md:max-w-md';
+            } else { // system
+                messageClass = 'text-center';
+                contentClass = 'bg-yellow-200 text-yellow-800 text-xs py-1 px-3 rounded-full inline-block';
+            }
+
+            if (type === 'system') {
+                messageDiv.className = messageClass;
+                messageDiv.innerHTML = `<span class="${contentClass}">${text}</span>`;
+            } else {
+                messageDiv.className = messageClass;
+                messageDiv.innerHTML = `
+                    <div class="flex flex-col space-y-1">
+                        <span class="text-xs ${type === 'local' ? 'text-right' : 'text-left'} text-gray-500">${sender} (${time})</span>
+                        <div class="${contentClass} p-3 break-words whitespace-pre-wrap">
+                            ${text}
+                        </div>
+                    </div>
+                `;
+            }
+            
+            chatWindow.appendChild(messageDiv);
+            chatWindow.scrollTop = chatWindow.scrollHeight; // 스크롤을 가장 아래로 이동
+        }
+
+        /**
+         * UI 상태를 초기화합니다.
+         */
+        function resetUI() {
+            isConnected = false;
+            currentConnection = null;
+            chatSection.classList.add('opacity-50', 'pointer-events-none');
+            messageInput.disabled = true;
+            sendButton.disabled = true;
+            connectButton.disabled = false;
+            remotePeerIdInput.disabled = false;
+            infoBox.classList.remove('hidden');
+        }
+
+        /**
+         * 커스텀 모달을 표시합니다 (alert() 대체).
+         * @param {string} title - 모달 제목
+         * @param {string} body - 모달 내용
+         */
+        function showModal(title, body) {
+            document.getElementById('modal-title').textContent = title;
+            document.getElementById('modal-body').textContent = body;
+            document.getElementById('custom-modal').classList.remove('hidden');
+            document.getElementById('custom-modal').classList.add('flex');
+        }
+
+        /**
+         * 커스텀 모달을 닫습니다.
+         */
+        window.closeModal = function() {
+            document.getElementById('custom-modal').classList.add('hidden');
+            document.getElementById('custom-modal').classList.remove('flex');
+        }
+
+    </script>
+</body>
+</html>
